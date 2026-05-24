@@ -2,7 +2,7 @@
 
 > DISCLAIMER: This app was mostly vibe coded, if the code is bad blame the free GitHub copilot and not me. Thanks :)
 
-An app that finds the most optimal meetup location for the group hangout! Very basic logic, takes the average longitude and latitude coordinates for each of the entered points and sets that as a central meeting point.
+An app that finds the most 'optimal' meetup location for the group hangout! Very basic logic, takes the average longitude and latitude coordinates for each of the entered points and sets that as a central meeting point.
 
 ## Run locally
 
