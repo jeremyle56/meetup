@@ -1,0 +1,432 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{{.Title}}</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="page">
+      <header class="hero">
+        <div>
+          <h1>Meetup Locator</h1>
+          <p>Enter addresses, plot them on the map, and find the central point of all markers.</p>
+        </div>
+      </header>
+
+      <section class="panel controls-panel">
+        <div id="address-list"></div>
+        <div class="button-row">
+          <button id="add-address" type="button">Add address</button>
+          <button id="geocode-button" type="button">Show on map</button>
+        </div>
+        <div id="status" class="status"></div>
+      </section>
+
+      <section class="panel map-panel">
+        <div id="map"></div>
+        <div id="summary" class="summary">
+          <h2>Results</h2>
+          <p>
+            Enter addresses and click <strong>Show on map</strong> to display markers and the
+            central point.
+          </p>
+        </div>
+      </section>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+      const addressList = document.getElementById('address-list');
+      const statusEl = document.getElementById('status');
+      const summaryEl = document.getElementById('summary');
+      const geocodeButton = document.getElementById('geocode-button');
+      const addButton = document.getElementById('add-address');
+
+      const map = L.map('map').setView([-33.8688, 151.2093], 11);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '© OpenStreetMap contributors',
+        maxZoom: 19,
+      }).addTo(map);
+
+      let markers = [];
+      let centerMarker = null;
+      let guideLines = [];
+      let previewMarkers = new Map();
+      let suggestionRowCount = 0;
+
+      function positionSuggestionsBox(suggestions, input) {
+        const rect = input.getBoundingClientRect();
+        suggestions.style.left = `${rect.left + window.scrollX}px`;
+        suggestions.style.top = `${rect.bottom + window.scrollY + 6}px`;
+        suggestions.style.width = `${rect.width}px`;
+      }
+
+      function setSuggestionBoxVisible(suggestions, input, visible) {
+        if (visible) {
+          positionSuggestionsBox(suggestions, input);
+          suggestions.hidden = false;
+        } else {
+          suggestions.hidden = true;
+        }
+      }
+
+      function createAddressRow(value = '') {
+        const row = document.createElement('div');
+        row.className = 'address-row';
+
+        const fieldset = document.createElement('div');
+        fieldset.className = 'address-fieldset';
+
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.placeholder = 'Start typing an address';
+        input.value = value;
+        input.autocomplete = 'off';
+        input.id = `address-input-${suggestionRowCount}`;
+
+        const suggestions = document.createElement('div');
+        suggestions.className = 'suggestions-list';
+        suggestions.hidden = true;
+        suggestions.dataset.inputId = input.id;
+
+        let suggestionTimer = null;
+        input.addEventListener('input', () => {
+          row.dataset.lat = '';
+          row.dataset.lon = '';
+          row.dataset.name = '';
+          suggestions.innerHTML = '';
+          setSuggestionBoxVisible(suggestions, input, false);
+          removePreviewMarker(row);
+
+          const query = input.value.trim();
+          if (query.length < 3) {
+            return;
+          }
+
+          if (suggestionTimer) {
+            clearTimeout(suggestionTimer);
+          }
+          suggestionTimer = setTimeout(() => {
+            fetchSuggestions(query, suggestions, row, input);
+          }, 250);
+        });
+
+        const removeButton = document.createElement('button');
+        removeButton.type = 'button';
+        removeButton.className = 'remove-button';
+        removeButton.textContent = 'Remove';
+        removeButton.addEventListener('click', () => {
+          removePreviewMarker(row);
+          suggestions.remove();
+          row.remove();
+        });
+
+        fieldset.appendChild(input);
+        row.appendChild(fieldset);
+        row.appendChild(removeButton);
+        addressList.appendChild(row);
+        document.body.appendChild(suggestions);
+
+        suggestionRowCount += 1;
+      }
+
+      function setStatus(message, isError = false) {
+        statusEl.textContent = message;
+        statusEl.classList.toggle('status-error', isError);
+      }
+
+      function setPreviewMarker(row, location) {
+        removePreviewMarker(row);
+        const marker = L.marker([location.lat, location.lon], {
+          opacity: 0.9,
+        }).addTo(map);
+        marker.bindPopup(`<strong>${location.address}</strong><br>${location.name}`).openPopup();
+        previewMarkers.set(row, marker);
+        updatePreviewBounds();
+      }
+
+      function removePreviewMarker(row) {
+        const marker = previewMarkers.get(row);
+        if (marker) {
+          map.removeLayer(marker);
+          previewMarkers.delete(row);
+        }
+      }
+
+      function updatePreviewBounds() {
+        const points = [];
+        previewMarkers.forEach((marker) => {
+          points.push(marker.getLatLng());
+        });
+        if (points.length === 0) {
+          return;
+        }
+        if (points.length === 1) {
+          map.setView(points[0], 14);
+        } else {
+          map.fitBounds(points, { padding: [40, 40] });
+        }
+      }
+
+      function createSuggestionItem(item, container, row, input) {
+        const option = document.createElement('button');
+        option.type = 'button';
+        option.className = 'suggestion-item';
+        option.innerHTML = `<span class="suggestion-text">${item.name}</span>`;
+        option.addEventListener('click', async () => {
+          input.value = item.name;
+          row.dataset.lat = item.lat;
+          row.dataset.lon = item.lon;
+          row.dataset.name = item.name;
+          container.innerHTML = '';
+          container.hidden = true;
+          setPreviewMarker(row, {
+            lat: item.lat,
+            lon: item.lon,
+            name: item.name,
+            address: item.name,
+          });
+          setStatus('Selected address previewed on the map.');
+          await handleGeocode();
+        });
+        container.appendChild(option);
+      }
+
+      async function fetchSuggestions(query, container, row, input) {
+        try {
+          const response = await fetch(`/api/search?query=${encodeURIComponent(query)}`);
+          if (!response.ok) {
+            return;
+          }
+          const suggestions = await response.json();
+          container.innerHTML = '';
+          if (!Array.isArray(suggestions) || suggestions.length === 0) {
+            setSuggestionBoxVisible(container, input, false);
+            return;
+          }
+
+          suggestions.forEach((item) => createSuggestionItem(item, container, row, input));
+          setSuggestionBoxVisible(container, input, true);
+        } catch {
+          setSuggestionBoxVisible(container, input, false);
+        }
+      }
+
+      window.addEventListener('click', (event) => {
+        const openLists = document.querySelectorAll('.suggestions-list:not([hidden])');
+        openLists.forEach((list) => {
+          const input = document.getElementById(list.dataset.inputId);
+          if (input && !list.contains(event.target) && !input.contains(event.target)) {
+            setSuggestionBoxVisible(list, input, false);
+          }
+        });
+      });
+
+      window.addEventListener('resize', () => {
+        document.querySelectorAll('.suggestions-list:not([hidden])').forEach((list) => {
+          const input = document.getElementById(list.dataset.inputId);
+          if (input) {
+            positionSuggestionsBox(list, input);
+          }
+        });
+      });
+
+      window.addEventListener(
+        'scroll',
+        () => {
+          document.querySelectorAll('.suggestions-list:not([hidden])').forEach((list) => {
+            const input = document.getElementById(list.dataset.inputId);
+            if (input) {
+              positionSuggestionsBox(list, input);
+            }
+          });
+        },
+        true,
+      );
+
+      function clearMap() {
+        markers.forEach((marker) => map.removeLayer(marker));
+        markers = [];
+        guideLines.forEach((line) => map.removeLayer(line));
+        guideLines = [];
+        if (centerMarker) {
+          map.removeLayer(centerMarker);
+          centerMarker = null;
+        }
+        previewMarkers.forEach((marker) => map.removeLayer(marker));
+        previewMarkers.clear();
+      }
+
+      function computeCentroid(points) {
+        const total = points.length;
+        const sum = points.reduce(
+          (acc, item) => {
+            return { lat: acc.lat + item.lat, lon: acc.lon + item.lon };
+          },
+          { lat: 0, lon: 0 },
+        );
+        return { lat: sum.lat / total, lon: sum.lon / total };
+      }
+
+      function formatNumber(value, digits = 5) {
+        return Number(value).toFixed(digits);
+      }
+
+      function updateMap(locations, center) {
+        clearMap();
+        const bounds = [];
+
+        locations.forEach((location) => {
+          const marker = L.marker([location.lat, location.lon]).addTo(map);
+          marker.bindPopup(`<strong>${location.address}</strong><br>${location.name}`);
+          markers.push(marker);
+          bounds.push([location.lat, location.lon]);
+
+          const line = L.polyline(
+            [
+              [center.lat, center.lon],
+              [location.lat, location.lon],
+            ],
+            {
+              color: '#3366cc',
+              weight: 2,
+              opacity: 0.6,
+              dashArray: '4 6',
+            },
+          ).addTo(map);
+          guideLines.push(line);
+        });
+
+        centerMarker = L.circleMarker([center.lat, center.lon], {
+          radius: 10,
+          color: '#d62828',
+          fillColor: '#ff6b6b',
+          fillOpacity: 0.8,
+          weight: 2,
+        }).addTo(map);
+        centerMarker.bindPopup('<strong>Central point</strong>').openPopup();
+        bounds.push([center.lat, center.lon]);
+
+        if (bounds.length === 1) {
+          map.setView(bounds[0], 14);
+        } else {
+          map.fitBounds(bounds, { padding: [40, 40] });
+        }
+      }
+
+      function renderSummary(locations, center, centerAddress) {
+        const total = locations.length;
+        const addressItems = locations
+          .map((location, index) => {
+            return `<li><strong>${index + 1}.</strong> ${location.address}<br><span>${location.name}</span></li>`;
+          })
+          .join('');
+
+        summaryEl.innerHTML = `
+        <h2>Results</h2>
+        <p>Found <strong>${total}</strong> locations. Central point coordinates:</p>
+        <p><strong>Latitude:</strong> ${formatNumber(center.lat)}<br><strong>Longitude:</strong> ${formatNumber(center.lon)}</p>
+        <p><strong>Nearest address:</strong> ${centerAddress || 'Not available'}</p>
+        <h3>Addresses</h3>
+        <ul class="summary-list">${addressItems}</ul>
+      `;
+      }
+
+      async function reverseGeocode(lat, lon) {
+        const response = await fetch(
+          `/api/reverse?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`,
+        );
+        if (!response.ok) {
+          const body = await response.text();
+          throw new Error(body || 'Failed to reverse geocode location');
+        }
+        return response.json();
+      }
+
+      async function geocodeAddress(query) {
+        const encoded = encodeURIComponent(query);
+        const response = await fetch(`/api/geocode?query=${encoded}`);
+        if (!response.ok) {
+          const body = await response.text();
+          throw new Error(body || 'Failed to geocode address');
+        }
+        return response.json();
+      }
+
+      async function handleGeocode() {
+        setStatus('Geocoding addresses...');
+        const rows = Array.from(addressList.querySelectorAll('.address-row'));
+        const entries = [];
+
+        rows.forEach((row) => {
+          const input = row.querySelector('input');
+          const address = input.value.trim();
+          if (!address) {
+            return;
+          }
+
+          const lat = parseFloat(row.dataset.lat);
+          const lon = parseFloat(row.dataset.lon);
+          const name = row.dataset.name || address;
+
+          entries.push({ address, lat, lon, name });
+        });
+
+        const validEntries = entries.filter((entry) => entry.address);
+        if (validEntries.length === 0) {
+          setStatus('Please enter at least one address.', true);
+          return;
+        }
+
+        geocodeButton.disabled = true;
+        addButton.disabled = true;
+        try {
+          const results = [];
+          for (const entry of validEntries) {
+            if (Number.isFinite(entry.lat) && Number.isFinite(entry.lon)) {
+              results.push({
+                address: entry.address,
+                name: entry.name,
+                lat: entry.lat,
+                lon: entry.lon,
+              });
+              continue;
+            }
+            const data = await geocodeAddress(entry.address);
+            results.push({ address: entry.address, name: data.name, lat: data.lat, lon: data.lon });
+          }
+
+          const center = computeCentroid(results);
+          updateMap(results, center);
+          let centerAddress = '';
+          try {
+            const data = await reverseGeocode(center.lat, center.lon);
+            centerAddress = data.name;
+          } catch (reverseError) {
+            console.warn('reverse geocode failed', reverseError);
+            centerAddress = 'Address not found';
+          }
+          renderSummary(results, center, centerAddress);
+          setStatus('Map updated with locations and central point.');
+        } catch (error) {
+          setStatus(error.message, true);
+        } finally {
+          geocodeButton.disabled = false;
+          addButton.disabled = false;
+        }
+      }
+
+      function initialize() {
+        createAddressRow();
+
+        addButton.addEventListener('click', () => createAddressRow());
+        geocodeButton.addEventListener('click', handleGeocode);
+      }
+
+      initialize();
+    </script>
+  </body>
+</html>
